@@ -24,19 +24,20 @@ import tensorflow as tf
 #  2. Then, build sentence LSTM, word LSTM
 # ------------------------------------------------------------------------------------------------------
 class RegionPooling_HierarchicalRNN():
-    def __init__(self, n_words,
+    def __init__(self, n_words,      # unique字的数量
                        batch_size,
                        num_boxes,
-                       feats_dim,
-                       project_dim,
-                       sentRNN_lstm_dim,
-                       sentRNN_FC_dim,
+                       feats_dim,    # 每一个特征的维度
+                       project_dim,  # 将所有特征映射到一个向量的维度
+                       sentRNN_lstm_dim,   # 隐藏层数量
+                       sentRNN_FC_dim,     # 全连接数量
                        wordRNN_lstm_dim,
-                       S_max,
-                       N_max,
-                       word_embed_dim,
+                       S_max,    # topic最多的个数
+                       N_max,    # 每个句子字的个数
+                       word_embed_dim,   # 词向量的维度
                        bias_init_vector=None):
 
+        # 此函数中创建模型的各个网络层
         self.n_words = n_words
         self.batch_size = batch_size
         self.num_boxes = num_boxes # 50
@@ -53,33 +54,34 @@ class RegionPooling_HierarchicalRNN():
         # word embedding, parameters of embedding
         # embedding shape: n_words x wordRNN_lstm_dim
         with tf.device('/cpu:0'):
-            self.Wemb = tf.Variable(tf.random_uniform([n_words, word_embed_dim], -0.1, 0.1), name='Wemb')
+            self.Wemb = tf.Variable(tf.random_uniform([n_words, word_embed_dim], -0.1, 0.1), name='Wemb')  # 生成字典中所有字的向量
         #self.bemb = tf.Variable(tf.zeros([word_embed_dim]), name='bemb')
 
         # regionPooling_W shape: 4096 x 1024
-        # regionPooling_b shape: 1024
+        # regionPooling_b shape: 1024           将所有的图像特征转为一个向量表示
         self.regionPooling_W = tf.Variable(tf.random_uniform([feats_dim, project_dim], -0.1, 0.1), name='regionPooling_W')
         self.regionPooling_b = tf.Variable(tf.zeros([project_dim]), name='regionPooling_b')
 
-        # sentence LSTM
+        # sentence LSTM       第一个长短期记忆网络
         self.sent_LSTM = tf.nn.rnn_cell.BasicLSTMCell(sentRNN_lstm_dim, state_is_tuple=True)
 
-        # logistic classifier
+        # logistic classifier   （1）分类器判断是否停止产生新的句子
         self.logistic_Theta_W = tf.Variable(tf.random_uniform([sentRNN_lstm_dim, 2], -0.1, 0.1), name='logistic_Theta_W')
         self.logistic_Theta_b = tf.Variable(tf.zeros(2), name='logistic_Theta_b')
 
         # fc1_W: 512 x 1024, fc1_b: 1024
-        # fc2_W: 1024 x 1024, fc2_b: 1024
+        # fc2_W: 1024 x 1024, fc2_b: 1024      （2）使用全链接生成句子的主题向量
         self.fc1_W = tf.Variable(tf.random_uniform([sentRNN_lstm_dim, sentRNN_FC_dim], -0.1, 0.1), name='fc1_W')
         self.fc1_b = tf.Variable(tf.zeros(sentRNN_FC_dim), name='fc1_b')
         self.fc2_W = tf.Variable(tf.random_uniform([sentRNN_FC_dim, 1024], -0.1, 0.1), name='fc2_W')
         self.fc2_b = tf.Variable(tf.zeros(1024), name='fc2_b')
 
-        # word LSTM
+        # word LSTM           第二个长短期记忆网络（两层）
         self.word_LSTM = tf.nn.rnn_cell.BasicLSTMCell(wordRNN_lstm_dim, state_is_tuple=True)
         self.word_LSTM = tf.nn.rnn_cell.MultiRNNCell([self.word_LSTM] * 2, state_is_tuple=True)
         #self.word_LSTM2 = tf.nn.rnn_cell.BasicLSTMCell(wordRNN_lstm_dim, state_is_tuple=True)
 
+        #                     将隐层转成预测的词向量
         self.embed_word_W = tf.Variable(tf.random_uniform([wordRNN_lstm_dim, n_words], -0.1,0.1), name='embed_word_W')
         if bias_init_vector is not None:
             self.embed_word_b = tf.Variable(bias_init_vector.astype(np.float32), name='embed_word_b')
@@ -88,22 +90,22 @@ class RegionPooling_HierarchicalRNN():
 
     def build_model(self):
         # receive the feats in the current image
-        # it's shape is 10 x 50 x 4096
-        # tmp_feats: 500 x 4096
+        # it's shape is 10 x 50 x 4096   每个batch 10张图片，每个图片50个box，每个box特征维度4096
+        # tmp_feats: 500 x 4096                             input:图像特征
         feats = tf.placeholder(tf.float32, [self.batch_size, self.num_boxes, self.feats_dim])
         tmp_feats = tf.reshape(feats, [-1, self.feats_dim])
 
         # project_vec_all: 500 x 4096 * 4096 x 1024 --> 500 x 1024
-        # project_vec: 10 x 1024
+        # project_vec: 10 x 1024                            input:将图像特征转为一个向量
         project_vec_all = tf.matmul(tmp_feats, self.regionPooling_W) + self.regionPooling_b
         project_vec_all = tf.reshape(project_vec_all, [self.batch_size, 50, self.project_dim])
         project_vec = tf.reduce_max(project_vec_all, reduction_indices=1)
 
         # receive the [continue:0, stop:1] lists
-        # example: [0, 0, 0, 0, 1, 1], it means this paragraph has five sentences
+        # example: [0, 0, 0, 0, 1, 1], it means this paragraph has five sentences    target:判断是否继续生成句子
         num_distribution = tf.placeholder(tf.int32, [self.batch_size, self.S_max])
 
-        # receive the ground truth words, which has been changed to idx use word2idx function
+        # receive the ground truth words, which has been changed to idx use word2idx function     target-句子中的每个单词
         captions = tf.placeholder(tf.int32, [self.batch_size, self.S_max, self.N_max+1])
         captions_masks = tf.placeholder(tf.float32, [self.batch_size, self.S_max, self.N_max+1])
 
@@ -113,7 +115,7 @@ class RegionPooling_HierarchicalRNN():
         # 2. https://www.tensorflow.org/api_docs/python/rnn_cell/classes_storing_split_rnncell_state#LSTMStateTuple
         # 3. https://medium.com/@erikhallstrm/using-the-tensorflow-lstm-api-3-7-5f2b97ca6b73#.u4w9z6h0h
         # ---------------------------------------------------------------------------------------------------------------------
-        sent_state = self.sent_LSTM.zero_state(batch_size=self.batch_size, dtype=tf.float32)
+        sent_state = self.sent_LSTM.zero_state(batch_size=self.batch_size, dtype=tf.float32)    # 第一个LSTM的初始输入状态
         #word_state = self.word_LSTM.zero_state(batch_size=self.batch_size, dtype=tf.float32)
         #word_state1 = self.word_LSTM1.zero_state(batch_size=self.batch_size, dtype=tf.float32)
         #word_state2 = self.word_LSTM2.zero_state(batch_size=self.batch_size, dtype=tf.float32)
@@ -133,17 +135,18 @@ class RegionPooling_HierarchicalRNN():
         # Hierarchical RNN: sentence RNN and words RNN
         # The word RNN has the max number, N_max = 50, the number in the papar is 50
         #----------------------------------------------------------------------------------------------
+        # 循环迭代，将两层的LSTM连接起来
         for i in range(0, self.S_max):
             if i > 0:
                 tf.get_variable_scope().reuse_variables()
 
             with tf.variable_scope('sent_LSTM'):
-                sent_output, sent_state = self.sent_LSTM(project_vec, sent_state)
+                sent_output, sent_state = self.sent_LSTM(project_vec, sent_state)       # 得到LSTM的输出和隐藏状态
 
             with tf.name_scope('fc1'):
                 hidden1 = tf.nn.relu( tf.matmul(sent_output, self.fc1_W) + self.fc1_b )
             with tf.name_scope('fc2'):
-                sent_topic_vec = tf.nn.relu( tf.matmul(hidden1, self.fc2_W) + self.fc2_b )
+                sent_topic_vec = tf.nn.relu( tf.matmul(hidden1, self.fc2_W) + self.fc2_b )  # 将输出和隐藏状态转化为主题向量
 
             # sent_state is a tuple, sent_state = (c, h)
             # 'c': shape=(1, 512) dtype=float32, 'h': shape=(1, 512) dtype=float32
@@ -158,7 +161,7 @@ class RegionPooling_HierarchicalRNN():
             sentRNN_loss = tf.nn.softmax_cross_entropy_with_logits(sentRNN_logistic_mu, sentRNN_label)
             sentRNN_loss = tf.reduce_sum(sentRNN_loss)/self.batch_size
             loss += sentRNN_loss * lambda_sent
-            loss_sent += sentRNN_loss
+            loss_sent += sentRNN_loss                               # 计算主题生成的损失
 
             # the begining input of word_LSTM is topic vector, and DON'T compute the loss
             # This is follow the paper: Show and Tell
@@ -255,19 +258,19 @@ class RegionPooling_HierarchicalRNN():
             #with tf.variable_scope('word_LSTM'):
             #    word_output, word_state = self.word_LSTM(sent_topic_vec, word_state)
             topic = tf.nn.rnn_cell.LSTMStateTuple(sent_topic_vec[:, 0:512], sent_topic_vec[:, 512:])
-            word_state = (topic, topic)
+            word_state = (topic, topic)                                 #  将主题向量分成两部分，作为两层的初始化单元状态;
             # word RNN, unrolled to N_max time steps
             for j in range(0, self.N_max):
                 if j > 0:
                     tf.get_variable_scope().reuse_variables()
 
                 if j == 0:
-		    with tf.device('/cpu:0'):
-			# get word embedding of BOS (index = 0)
+                    with tf.device('/cpu:0'):
+                        # get word embedding of BOS (index = 0)
                         current_embed = tf.nn.embedding_lookup(self.Wemb, tf.zeros([1], dtype=tf.int64))
 
-                with tf.variable_scope('word_LSTM'):
-                    word_output, word_state = self.word_LSTM(current_embed, word_state)
+                 with tf.variable_scope('word_LSTM'):
+                    word_output, word_state = self.word_LSTM(input=current_embed, state=word_state)    # 每个时间步：输入词向量，单元的状态，
 
                 # word_state:
                 # (
@@ -276,17 +279,17 @@ class RegionPooling_HierarchicalRNN():
                 #     LSTMStateTuple(c=<tf.Tensor 'word_LSTM_152/MultiRNNCell/Cell1/BasicLSTMCell/add_2:0' shape=(1, 512) dtype=float32>,
                 #                    h=<tf.Tensor 'word_LSTM_152/MultiRNNCell/Cell1/BasicLSTMCell/mul_2:0' shape=(1, 512) dtype=float32>)
                 # )
-                logit_words = tf.nn.xw_plus_b(word_output, self.embed_word_W, self.embed_word_b)
+                logit_words = tf.nn.xw_plus_b(word_output, self.embed_word_W, self.embed_word_b)  # 再通过一层非线性生成每个词的词向量预测
                 max_prob_index = tf.argmax(logit_words, 1)[0]
                 generated_sent.append(max_prob_index)
 
                 with tf.device('/cpu:0'):
                     current_embed = tf.nn.embedding_lookup(self.Wemb, max_prob_index)
-                    current_embed = tf.expand_dims(current_embed, 0)
+                    current_embed = tf.expand_dims(current_embed, 0)   # 下一个时间步的输入
 
             generated_paragraph.append(generated_sent)
 
-        return feats, generated_paragraph, pred_re
+        return feats, generated_paragraph, pred_re    #  得到这些中间变量
 
 
 # -----------------------------------------------------------------------------------------------------
